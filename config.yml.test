@@ -1,0 +1,39 @@
+version: "3"
+
+main:
+  listen: 4000
+  route: "/metrics"
+
+
+app-name:
+  logs:
+    - "/var/log/nginx/access.log"
+    - "/var/log/nginx/access2.log"
+  methods:
+    GET:
+     - 400
+     - 500
+     - 200
+    POST:
+     - 401
+     - 200
+     - 500
+
+
+app-name2:
+  logs:
+    - "/var/log/nginx/access.log"
+    - "/var/log/nginx/access2.log"
+  methods:
+    GET:
+     - 400
+     - 500
+     - 200
+    POST:
+     - 401
+     - 200
+     - 500
+  route: "/metrics2"
+
+
+    
