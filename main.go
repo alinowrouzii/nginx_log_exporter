@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -97,22 +98,18 @@ func (metric *metricHandler) metricsHandler(w http.ResponseWriter, r *http.Reque
 	metric.m.Unlock()
 }
 
-func main() {
+var ymlPath string
 
-	// methods := map[string]map[string]map[string]int64{
-	// 	"SHIT": {"GET": {
-	// 		"400": 0,
-	// 		"500": 0,
-	// 		"200": 0,
-	// 	},
-	// 		"POST": {
-	// 			"200": 0,
-	// 			"400": 0,
-	// 			"500": 0,
-	// 		},
-	// 	},
-	// }
-	methods, logs, listenPort, route := parseYml()
+func init() {
+	flag.StringVar(&ymlPath, "config", "", "specify the path of yaml config")
+	flag.Parse()
+}
+
+func main() {
+	if ymlPath == "" {
+		panic("config path is required. Type --help for more info")
+	}
+	methods, logs, listenPort, route := parseYml(ymlPath)
 
 	mux := tinymux.NewTinyMux()
 
@@ -145,9 +142,9 @@ func splitQoutes(s string) []string {
 	return out
 }
 
-func parseYml() (map[string]map[string]map[string]int64, map[string][]string, string, string) {
+func parseYml(ymlPath string) (map[string]map[string]map[string]int64, map[string][]string, string, string) {
 	parsedYml := make(map[interface{}]interface{})
-	data, err := ioutil.ReadFile("./config.yml")
+	data, err := ioutil.ReadFile(ymlPath)
 
 	if err != nil {
 		panic(err)
