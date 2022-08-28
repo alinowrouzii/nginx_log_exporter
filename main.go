@@ -12,33 +12,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type MetricHandler struct {
+const (
+	defaultPort  = "4000"
+	defaultRoute = "/mterics"
+)
+
+type metricHandler struct {
 	// data mutex
 	m sync.Mutex
-	// next to access mutext
+	// next to access mutex
 	n sync.Mutex
-	// low priority mutext
+	// low priority mutexes
 	l sync.Mutex
-	// for instance: methods['GET'][400] gives the number of requests with method=GET and status code 400
-	methods *map[string]map[string]int64
+	// for instance: methods['SHIT']['GET'][400] gives the number of requests with method=GET and status code 400 of app=shit
+	methods map[string]map[string]map[string]int64
+	//
+	logs map[string][]string
 }
 
-type YamlConfig struct {
-	Main struct {
-		Listen int    `yaml:"listen"`
-		Route  string `yaml:"route"`
-	} `yaml:"main"`
-	Apps []struct {
-		AppName interface{} `yaml:"app-name"`
-		Logs    []string    `yaml:"logs"`
-		Methods struct {
-			GET  []int `yaml:"GET"`
-			POST []int `yaml:"POST"`
-		} `yaml:"methods"`
-	} `yaml:"apps"`
-}
-
-func proccessData(line string) (string, string, string) {
+func extractDataFromLine(line string) (string, string, string) {
 	data := splitQoutes(line)
 	if len(data) < 4 {
 		return "", "", ""
@@ -48,81 +40,98 @@ func proccessData(line string) (string, string, string) {
 	method := strings.Fields(data[2])[0]
 	bytesSent := data[3]
 
-	// fmt.Printf("'%s' '%s' '%s'\n\n", status, method, bytesSent)
 	return status, method, bytesSent
 }
 
-func (h *MetricHandler) metricsHandler(w http.ResponseWriter, r *http.Request) {
+func (metric *metricHandler) processData() {
+
+	for appName := range metric.methods {
+		// appMethods := metric.methods[appName]
+		appLogs := metric.logs[appName]
+
+		for _, logPath := range appLogs {
+			go func(logPath string) {
+				t, err := tail.TailFile(logPath, tail.Config{Follow: true})
+				if err != nil {
+					panic(err)
+				}
+				for line := range t.Lines {
+					status, method, _ := extractDataFromLine(line.Text)
+					metric.l.Lock()
+					metric.n.Lock()
+					metric.m.Lock()
+					metric.n.Unlock()
+					if _, ok := metric.methods[appName][method]; ok {
+						if _, ok := metric.methods[appName][method][status]; ok {
+							metric.methods[appName][method][status]++
+						}
+					}
+					metric.m.Unlock()
+					metric.l.Unlock()
+				}
+			}(logPath)
+		}
+
+	}
+
+}
+
+func (metric *metricHandler) metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 	// here we inform our goroutine calculator to does not enter to our critical section if
 	// handler wants to show the result to the client
-	h.n.Lock()
-	h.m.Lock()
-	h.n.Unlock()
+	metric.n.Lock()
+	metric.m.Lock()
+	metric.n.Unlock()
 	lines := ""
-	lines += fmt.Sprintf("# HELP my_nginx_log_exporter_requests_total Number of request with specified status and method.\n")
-	lines += fmt.Sprintf("# TYPE my_nginx_log_exporter_requests_total counter\n")
-	for method := range *h.methods {
-		for status := range (*h.methods)[method] {
-			// fmt.Printf("method=%s   status=%s    value=%d\n\n", method, status, (*h.methods)[method][status])
-			lines += fmt.Sprintf("my_nginx_log_exporter_requests_total{method=\"%s\", status=\"%s\"} %d\n", method, status, (*h.methods)[method][status])
+	lines += fmt.Sprintf("# HELP {name_space}_log_exporter_requests_total Number of request with specified status and method.\n")
+	lines += fmt.Sprintf("# TYPE {name_space}_log_exporter_requests_total counter\n")
+	for appName := range metric.methods {
+		for method := range metric.methods[appName] {
+			for status := range metric.methods[appName][method] {
+				lines += fmt.Sprintf("%s_log_exporter_requests_total{method=\"%s\", status=\"%s\"} %d\n", appName, method, status, metric.methods[appName][method][status])
+			}
 		}
 	}
 	w.Write([]byte(lines))
-	h.m.Unlock()
+	metric.m.Unlock()
 }
 
 func main() {
 
-	methods := map[string]map[string]int64{
-		"GET": {
-			"400": 0,
-			"500": 0,
-			"200": 0,
-		},
-		"POST": {
-			"200": 0,
-			"400": 0,
-			"500": 0,
-		},
-	}
+	// methods := map[string]map[string]map[string]int64{
+	// 	"SHIT": {"GET": {
+	// 		"400": 0,
+	// 		"500": 0,
+	// 		"200": 0,
+	// 	},
+	// 		"POST": {
+	// 			"200": 0,
+	// 			"400": 0,
+	// 			"500": 0,
+	// 		},
+	// 	},
+	// }
+	methods, logs, listenPort, route := parseYml()
 
 	mux := tinymux.NewTinyMux()
 
-	metric := &MetricHandler{
-		methods: &methods,
+	metric := &metricHandler{
+		methods: methods,
+		logs:    logs,
 	}
 
 	fmt.Println(metric)
 
 	fmt.Println("hello world!")
 
-	go func() {
-		t, _ := tail.TailFile("/var/log/nginx/access.log", tail.Config{Follow: true})
-		for line := range t.Lines {
-			status, method, _ := proccessData(line.Text)
-			if _, ok := (*metric.methods)[method]; ok {
-				if _, ok := (*metric.methods)[method][status]; ok {
+	go metric.processData()
 
-					metric.l.Lock()
-					metric.n.Lock()
-					metric.m.Lock()
-					metric.n.Unlock()
+	fmt.Println(route, listenPort)
+	mux.GET(route, http.HandlerFunc(metric.metricsHandler))
 
-					(*metric.methods)[method][status]++
+	http.ListenAndServe(fmt.Sprintf(":%s", listenPort), mux)
 
-					metric.m.Unlock()
-					metric.l.Unlock()
-				}
-			}
-		}
-	}()
-
-	mux.GET("/metrics", http.HandlerFunc(metric.metricsHandler))
-
-	http.ListenAndServe(":8888", mux)
-
-	// parseYml()
 }
 
 func splitQoutes(s string) []string {
@@ -136,22 +145,7 @@ func splitQoutes(s string) []string {
 	return out
 }
 
-var data = `
-a: Easy!
-b:
-  c: 2
-  d: [3, 4]
-`
-
-type App struct {
-	Logs    []string `yaml:"logs"`
-	Methods struct {
-		GET  []int `yaml:"GET"`
-		POST []int `yaml:"POST"`
-	} `yaml:"methods"`
-}
-
-func parseYml() {
+func parseYml() (map[string]map[string]map[string]int64, map[string][]string, string, string) {
 	parsedYml := make(map[interface{}]interface{})
 	data, err := ioutil.ReadFile("./config.yml")
 
@@ -172,8 +166,8 @@ func parseYml() {
 	}
 
 	main, ok := parsedYml["main"]
-	parsedListen := "8888"
-	parsedRoute := "metrics"
+	parsedListen := defaultPort
+	parsedRoute := defaultRoute
 	if ok {
 		parsedMain, ok := main.(map[string]interface{})
 		if !ok {
@@ -197,13 +191,16 @@ func parseYml() {
 		}
 	}
 
-	for appName := range apps.(map[string]interface{}) {
+	methodsResult := make(map[string]map[string]map[string]int64)
+	logsResult := make(map[string][]string)
 
+	for appName := range apps.(map[string]interface{}) {
 		app := apps.(map[string]interface{})[appName].(map[string]interface{})
 		logs, ok := app["logs"]
 		if !ok {
 			panic("invalid yaml format")
 		}
+		methodsResult[appName] = make(map[string]map[string]int64)
 
 		parsedLogs := make([]string, 0)
 		switch t := logs.(type) {
@@ -214,6 +211,7 @@ func parseYml() {
 					panic("invalid yaml format")
 				}
 				parsedLogs = append(parsedLogs, castedValue)
+				logsResult[appName] = append(logsResult[appName], castedValue)
 			}
 		default:
 			panic("invalid yaml format")
@@ -230,27 +228,27 @@ func parseYml() {
 			panic("invalid yaml format")
 		}
 
-		allMethdos := make(map[string][]string)
 		for methodName := range parsedMethods {
+			methodsResult[appName][methodName] = make(map[string]int64)
 			switch t := parsedMethods[methodName].(type) {
 			case []interface{}:
-				for _, value := range t {
-					castedValue, ok := value.(string)
+				for _, status := range t {
+					castedStatus, ok := status.(string)
 					if !ok {
 						panic("invalid yaml format")
 					}
-					allMethdos[methodName] = append(allMethdos[methodName], castedValue)
+					methodsResult[appName][methodName][castedStatus] = 0
+					// allMethdos[methodName] = append(allMethdos[methodName], castedValue)
 				}
 			default:
 				panic("invalid yaml format")
 			}
 		}
-
-		fmt.Println(allMethdos)
-		fmt.Println(parsedLogs)
 	}
 
 	fmt.Println(parsedListen)
 	fmt.Println(parsedRoute)
-
+	fmt.Println(methodsResult)
+	fmt.Println(logsResult)
+	return methodsResult, logsResult, parsedListen, parsedRoute
 }
